@@ -12,6 +12,7 @@ export default function NumberTray({
   onSelectNumber,
   onDragStart,
   gridSize,
+  disabled = false,
 }) {
   const allNumbers = Array.from({ length: totalNumbers }, (_, i) => i + 1);
   const tileSize = gridSize === 4 ? 'md' : 'lg';
@@ -52,6 +53,7 @@ export default function NumberTray({
                   onSelect={onSelectNumber}
                   onDragStart={onDragStart}
                   size={tileSize}
+                  disabled={disabled}
                 />
               )}
             </div>

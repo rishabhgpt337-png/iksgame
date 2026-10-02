@@ -3,7 +3,7 @@ import GameHeader from '../components/GameHeader';
 import MagicGrid from '../components/MagicGrid';
 import NumberTray from '../components/NumberTray';
 import SuccessModal from '../components/SuccessModal';
-import { isMagicSquare, getLineStatus } from '../utils/magicSquare';
+import { isMagicSquare, checkCompletedLines, getResetCellsForInvalidLine } from '../utils/magicSquare';
 import { getBestTime, setBestTime } from '../utils/storage';
 
 /**
@@ -18,6 +18,14 @@ export default function Game({ level, onBack, onNextLevel }) {
   // Board state: array of length size*size, holding numbers or null
   const [board, setBoard] = useState(() => Array(totalCells).fill(null));
   const [selectedNumber, setSelectedNumber] = useState(null);
+
+  // Track placement history (indices of cells) for intelligent auto-reset
+  const [placementHistory, setPlacementHistory] = useState([]);
+
+  // Feedback states
+  const [shakingCells, setShakingCells] = useState([]);
+  const [isLocked, setIsLocked] = useState(false);
+
   const [moves, setMoves] = useState(0);
   const [timer, setTimer] = useState(0);
   const [isWon, setIsWon] = useState(false);
@@ -32,8 +40,8 @@ export default function Game({ level, onBack, onNextLevel }) {
   }, [board]);
 
   // Line completion status for live feedback
-  const lineStatus = useMemo(() => {
-    return getLineStatus(board, size, target);
+  const lineData = useMemo(() => {
+    return checkCompletedLines(board, size, target);
   }, [board, size, target]);
 
   // Timer runner
@@ -51,9 +59,48 @@ export default function Game({ level, onBack, onNextLevel }) {
     };
   }, [isWon]);
 
-  // Validation on board change
+  // Validation and Auto-reset logic on board change
   useEffect(() => {
-    // Only check if all cells are filled
+    if (isWon || isLocked) return;
+
+    // 1. Check if there are any invalid lines
+    if (lineData.invalidLines && lineData.invalidLines.length > 0) {
+      // Pick the first invalid line to shake and reset
+      const invalidLine = lineData.invalidLines[0];
+
+      // Mark cells for shaking and lock input
+      setShakingCells(invalidLine.cells);
+      setIsLocked(true);
+
+      // Determine which cells to reset intelligently
+      const cellsToReset = getResetCellsForInvalidLine(
+        invalidLine,
+        board,
+        placementHistory,
+        lineData.validLines
+      );
+
+      // Schedule reset after 700ms (animation duration)
+      const shakeTimer = setTimeout(() => {
+        setBoard((prev) => {
+          const next = [...prev];
+          for (const cellIdx of cellsToReset) {
+            next[cellIdx] = null;
+          }
+          return next;
+        });
+
+        // Remove these cells from placement history
+        setPlacementHistory((prev) => prev.filter((idx) => !cellsToReset.includes(idx)));
+
+        setShakingCells([]);
+        setIsLocked(false);
+      }, 700);
+
+      return () => clearTimeout(shakeTimer);
+    }
+
+    // 2. Win condition check
     if (board.every((v) => v !== null)) {
       if (isMagicSquare(board, size, target)) {
         setIsWon(true);
@@ -62,11 +109,24 @@ export default function Game({ level, onBack, onNextLevel }) {
         setBestTimeState(getBestTime(level));
       }
     }
-  }, [board, size, target, level, timer]);
+  }, [board, size, target, level, timer, isWon, isLocked, lineData, placementHistory]);
+
+  const addPlacement = (newIndex, oldIndex = -1) => {
+    setPlacementHistory((prev) => {
+      let next = prev;
+      if (oldIndex !== -1) next = next.filter((idx) => idx !== oldIndex);
+      next = next.filter((idx) => idx !== newIndex); // remove if existing
+      return [...next, newIndex];
+    });
+  };
+
+  const removePlacement = (index) => {
+    setPlacementHistory((prev) => prev.filter((idx) => idx !== index));
+  };
 
   // Handle number tile selection from tray
   const handleSelectNumber = (num) => {
-    if (isWon) return;
+    if (isWon || isLocked) return;
     if (selectedNumber === num) {
       setSelectedNumber(null);
     } else {
@@ -76,21 +136,19 @@ export default function Game({ level, onBack, onNextLevel }) {
 
   // Handle cell click (tap-to-place / tap-to-remove)
   const handleCellClick = (cellIndex) => {
-    if (isWon) return;
+    if (isWon || isLocked) return;
     const currentVal = board[cellIndex];
 
     if (selectedNumber !== null) {
       // Place selected number in this cell
+      const oldIndex = board.indexOf(selectedNumber);
       setBoard((prev) => {
         const next = [...prev];
-        // If the selected number was already somewhere on the board, clear its old position
-        const oldIndex = next.indexOf(selectedNumber);
-        if (oldIndex !== -1) {
-          next[oldIndex] = null;
-        }
+        if (oldIndex !== -1) next[oldIndex] = null;
         next[cellIndex] = selectedNumber;
         return next;
       });
+      addPlacement(cellIndex, oldIndex);
       setSelectedNumber(null);
       setMoves((m) => m + 1);
     } else if (currentVal !== null) {
@@ -100,18 +158,19 @@ export default function Game({ level, onBack, onNextLevel }) {
         next[cellIndex] = null;
         return next;
       });
+      removePlacement(cellIndex);
       setMoves((m) => m + 1);
     }
   };
 
   // Handle drag-and-drop onto a grid cell
   const handleDropNumber = (value, targetIndex) => {
-    if (isWon) return;
+    if (isWon || isLocked) return;
+
+    const sourceIndex = board.indexOf(value);
 
     setBoard((prev) => {
       const next = [...prev];
-      const sourceIndex = next.indexOf(value);
-
       if (sourceIndex !== -1) {
         // Tile was already on the board — swap positions
         const targetVal = next[targetIndex];
@@ -124,18 +183,31 @@ export default function Game({ level, onBack, onNextLevel }) {
       return next;
     });
 
+    // Update placement history
+    if (sourceIndex !== -1) {
+      // Swapping: sourceIndex gets targetIndex's original value (if any)
+      const targetVal = board[targetIndex];
+      if (targetVal !== null) {
+        addPlacement(sourceIndex, targetIndex);
+      } else {
+        removePlacement(sourceIndex);
+      }
+    }
+    addPlacement(targetIndex, sourceIndex);
+
     setSelectedNumber(null);
     setMoves((m) => m + 1);
   };
 
   // Remove tile from grid (e.g. click directly on tile)
   const handleRemoveFromGrid = (cellIndex) => {
-    if (isWon) return;
+    if (isWon || isLocked) return;
     setBoard((prev) => {
       const next = [...prev];
       next[cellIndex] = null;
       return next;
     });
+    removePlacement(cellIndex);
     setMoves((m) => m + 1);
   };
 
@@ -143,6 +215,9 @@ export default function Game({ level, onBack, onNextLevel }) {
   const handleReset = () => {
     setBoard(Array(totalCells).fill(null));
     setSelectedNumber(null);
+    setPlacementHistory([]);
+    setShakingCells([]);
+    setIsLocked(false);
     setMoves(0);
     setTimer(0);
     setIsWon(false);
@@ -167,8 +242,10 @@ export default function Game({ level, onBack, onNextLevel }) {
           size={size}
           target={target}
           board={board}
-          lineStatus={lineStatus}
+          lineData={lineData}
+          shakingCells={shakingCells}
           selectedNumber={selectedNumber}
+          isLocked={isLocked}
           onCellClick={handleCellClick}
           onDropNumber={handleDropNumber}
           onRemoveFromGrid={handleRemoveFromGrid}
@@ -182,6 +259,7 @@ export default function Game({ level, onBack, onNextLevel }) {
         onSelectNumber={handleSelectNumber}
         onDragStart={(num) => setSelectedNumber(num)}
         gridSize={size}
+        disabled={isLocked}
       />
 
       {/* Success Modal */}
